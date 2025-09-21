@@ -215,36 +215,64 @@ if st.button("CSV/Excel generieren"):
     # Schritt 4a: CSV Export
     csv_data = df.to_csv(index=False, encoding="utf-8-sig")
 
-    # Schritt 4b: Excel Export mit schönerer Formatierung
+    # Schritt 4b: Excel Export (mit Formatierungen für * und ())
     excel_buffer = BytesIO()
     excel_data = None
 
     try:
+        import xlsxwriter
         with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Anwesenheiten")
+            df.to_excel(writer, index=False, sheet_name="Anwesenheiten", startrow=1, header=False)
             workbook  = writer.book
             worksheet = writer.sheets["Anwesenheiten"]
 
-            # Format: Umbruch + vertikal oben
-            wrap_format = workbook.add_format({"text_wrap": True, "valign": "top"})
-            header_format = workbook.add_format({"bold": True, "bg_color": "#D9E1F2"})
+            # Formate definieren
+            wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
+            bold = workbook.add_format({"text_wrap": True, "valign": "top", "bold": True})
+            italic = workbook.add_format({"text_wrap": True, "valign": "top", "italic": True})
+            header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9E1F2"})
 
-            # Header-Format anwenden
+            # Header schreiben
             for col_num, value in enumerate(df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
+                worksheet.write(0, col_num, value, header_fmt)
 
-            # Spaltenbreite anpassen
+            # Inhalte schreiben mit Formatierung
+            for row_num, row_data in enumerate(df.values, start=1):
+                for col_num, cell in enumerate(row_data):
+                    text = str(cell) if pd.notna(cell) else ""
+                    if not text:
+                        continue
+
+                    parts = []
+                    for i, line in enumerate(text.split("\n")):
+                        if line.startswith("*"):
+                            parts.extend([bold, line])
+                        elif line.startswith("(") and line.endswith(")"):
+                            parts.extend([italic, line])
+                        else:
+                            parts.extend([wrap, line])
+                        # Zeilenumbruch anhängen, außer bei letzter Zeile
+                        if i < len(text.split("\n")) - 1:
+                            parts.append("\n")
+
+                    # Immer mit Standardformat abschließen
+                    parts.append(wrap)
+
+                    worksheet.write_rich_string(row_num, col_num, *parts)
+
+            # Spaltenbreiten anpassen (max 30)
             for i, col in enumerate(df.columns):
                 max_len = max(
                     df[col].astype(str).map(len).max(),
                     len(col)
                 ) + 2
-                worksheet.set_column(i, i, min(max_len, 50), wrap_format)
+                worksheet.set_column(i, i, min(max_len, 30))
 
         excel_data = excel_buffer.getvalue()
 
     except ModuleNotFoundError:
-        st.error("Bitte 'xlsxwriter' installieren für schön formatierten Excel-Export.")
+        st.error("Bitte 'xlsxwriter' installieren für formatierten Excel-Export.")
+
 
 
     progress.progress(100, text="Fertig ✅")
