@@ -1,8 +1,9 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, date
-from io import StringIO
+from datetime import datetime, date, timedelta
+from dateutil.relativedelta import relativedelta
+from io import BytesIO
 
 # ---------------------------------------
 # UI
@@ -10,9 +11,13 @@ from io import StringIO
 st.title("Anwesenheiten Export")
 
 base_url = st.text_input("ChurchTools URL", "https://feg-thayngen.church.tools/")
-token = "Login " + st.text_input("AUTH_TOKEN", type="password")
-start = st.date_input("Von", date(2025, 11, 2))
-end = st.date_input("Bis", date(2026, 3, 1))
+raw_token = st.text_input("AUTH_TOKEN", type="password")
+
+# Standardwerte: heute bis +4 Monate
+today = date.today()
+default_end = today + relativedelta(months=4)
+start = st.date_input("Von", today)
+end = st.date_input("Bis", default_end)
 
 # Gruppen & Tags
 GROUPS = [
@@ -20,11 +25,41 @@ GROUPS = [
     {"id": 7,  "name": "Technik",  "tags": ["Video", "Audio", "Beamer", "Licht"]}
 ]
 
-# Services, die ins CSV sollen
-SERVICE_MAP = {
+# Dienste (vollständig parsen)
+SERVICE_MAP_FULL = {
+    1:  "Predigt",
+    2:  "Lobpreisleitung",
+    3:  "Moderation",
+    6:  "Audio",
+    7:  "Licht",
+    8:  "Video",
+    9:  "Musik",
+    12: "Beamer",
+    15: "Gebet",
+    18: "Begrüssung",
+    30: "Deko",
+    82: "Abendmahl vorbereiten",
+    36: "Abendmahl abwaschen",
+}
+
+# Dienste, die eigene Spalten bekommen
+SERVICE_MAP_EXPORT = {
     1: "Predigt",
     2: "Lobpreisleitung",
     3: "Moderation"
+}
+
+# Mapping: Tag -> Dienst
+TAG_TO_SERVICE = {
+    "Gebet": 15,
+    "Begrüssung": 18,
+    "Deko": 30,
+    "Abendmahl abwaschen": 36,
+    "Abendmahl vorbereiten": 82,
+    "Video": 8,
+    "Audio": 6,
+    "Beamer": 12,
+    "Licht": 7,
 }
 
 # ---------------------------------------
@@ -74,43 +109,53 @@ def get_full_name(person_id, headers, base_url):
 # ---------------------------------------
 # Button
 # ---------------------------------------
-if st.button("CSV generieren"):
+if st.button("CSV/Excel generieren"):
 
-    if not token:
+    if not raw_token:
         st.error("Bitte AUTH_TOKEN eingeben")
         st.stop()
+    headers = {"Content-Type": "application/json", "Authorization": "Login " + raw_token}
 
-    headers = {"Content-Type": "application/json", "Authorization": token}
     progress = st.progress(0, text="Starte Export...")
 
     # Schritt 1: Events
     events = get_events(str(start), str(end), headers, base_url)
-    progress.progress(20, text="Events geladen ✅")
+    progress.progress(15, text="Events geladen ✅")
 
     # Schritt 2: Gruppen & Daten vorbereiten
     absence_cache = {}
     tags_for_persons = {}
+    all_person_ids = set()
 
     for idx, group in enumerate(GROUPS, start=1):
         members = get_members(group["id"], headers, base_url)
         absences = get_group_absences(group["id"], str(start), str(end), headers, base_url)
 
-        # Absenzen sammeln
+        # Absenzen speichern
         for absence in absences:
             pid = int(absence["person"]["domainIdentifier"])
             s_date = datetime.strptime(absence["startDate"], "%Y-%m-%d").date()
             e_date = datetime.strptime(absence["endDate"], "%Y-%m-%d").date()
-            absence_cache.setdefault(pid, []).append((s_date, e_date))
+            cur = s_date
+            store = absence_cache.setdefault(pid, set())
+            while cur <= e_date:
+                store.add(cur)
+                cur = cur + timedelta(days=1)
 
         # Tags vorbereiten
         for tag in group["tags"]:
             col_name = f"{group['name']}: {tag}"
-            tags_for_persons[col_name] = []
+            pids_for_tag = []
             for pid in members:
                 if tag in get_tags(pid, headers, base_url):
-                    tags_for_persons[col_name].append(pid)
+                    pids_for_tag.append(pid)
+                    all_person_ids.add(pid)
+            tags_for_persons[col_name] = pids_for_tag
 
-        progress.progress(20 + int(60 * idx / len(GROUPS)), text=f"Gruppe {group['name']} geladen ✅")
+        progress.progress(15 + int(45 * idx / len(GROUPS)), text=f"Gruppe {group['name']} geladen ✅")
+
+    # Namen vorab cachen
+    names_cache = {pid: get_full_name(pid, headers, base_url) for pid in all_person_ids}
 
     # Schritt 3: DataFrame bauen
     rows = []
@@ -120,63 +165,107 @@ if st.button("CSV generieren"):
         event_note = event.get("note") or ""
         event_info = f"{event_title} ({event_note})" if event_note else event_title
 
-        row = {
-            "Datum": event_date.strftime("%a, %d.%m.%Y"),
-            "Event": event_info
-        }
+        row = {"Datum": event_date.strftime("%a, %d.%m.%Y"), "Event": event_info}
 
-        # --- Services einfügen ---
+        # --- Services parsen (alle IDs) ---
+        service_names = {sid: [] for sid in SERVICE_MAP_FULL.keys()}
         assigned_pids = set()
+
         for svc in event.get("eventServices", []):
             sid = svc.get("serviceId")
             person_obj = svc.get("person")
-            pid = None
-            person = {}
+            if sid in SERVICE_MAP_FULL and person_obj:
+                pid = int(person_obj.get("domainIdentifier"))
+                person = person_obj.get("domainAttributes", {}) or {}
+                full_name = f"{person.get('firstName','')} {person.get('lastName','')}".strip() \
+                            or get_full_name(pid, headers, base_url)
+                service_names[sid].append(f"*{full_name}")
+                assigned_pids.add(pid)
 
-            if person_obj:
-                pid = person_obj.get("domainIdentifier")
-                person = person_obj.get("domainAttributes", {})
-
-            if sid in SERVICE_MAP:
-                col = SERVICE_MAP[sid]
-                if person:
-                    full_name = f"{person.get('firstName', '')} {person.get('lastName', '')}".strip()
-                    row[col] = full_name
-                else:
-                    row[col] = ""
-
-            if pid:
-                assigned_pids.add(str(pid))
+        # Nur die Export-Dienste als eigene Spalten
+        for sid, col_name in SERVICE_MAP_EXPORT.items():
+            row[col_name] = ", ".join(service_names[sid]) if service_names[sid] else ""
 
         # --- Tags/Verfügbarkeiten einfügen ---
         for col, persons in tags_for_persons.items():
-            available_normal = []
-            available_assigned = []
-            for pid in persons:
-                absent = any(s <= event_date <= e for s, e in absence_cache.get(pid, []))
-                if not absent:
-                    name = get_full_name(pid, headers, base_url)
-                    if str(pid) in assigned_pids:
-                        available_assigned.append(f"({name})")
-                    else:
-                        available_normal.append(name)
-            row[col] = "\n".join(available_normal + available_assigned)
+            tag = col.split(": ", 1)[1] if ": " in col else col
+            sid_for_tag = TAG_TO_SERVICE.get(tag)
+
+            if sid_for_tag and service_names.get(sid_for_tag):
+                # Dienst besetzt -> nur eingeteilte Person(en) mit *
+                row[col] = ", ".join(service_names[sid_for_tag])
+            else:
+                # sonst alle verfügbaren Personen
+                available_normal = []
+                available_other = []
+                for pid in persons:
+                    if event_date not in absence_cache.get(pid, set()):
+                        base_name = names_cache.get(pid, f"Person {pid}")
+                        if pid in assigned_pids:
+                            available_other.append(f"({base_name})")
+                        else:
+                            available_normal.append(base_name)
+                row[col] = "\n".join(available_normal + available_other)
 
         rows.append(row)
-        progress.progress(80 + int(20 * i / len(events)), text="Events verarbeitet...")
+        progress.progress(60 + int(35 * i / max(len(events), 1)), text="Events verarbeitet...")
 
     df = pd.DataFrame(rows)
 
-    # Schritt 4: Export
-    csv_data = df.to_csv(index=False)
-    progress.progress(100, text="Fertig ✅")
-    st.success("CSV erfolgreich erstellt ✅")
+    # Schritt 4a: CSV Export
+    csv_data = df.to_csv(index=False, encoding="utf-8-sig")
 
+    # Schritt 4b: Excel Export mit schönerer Formatierung
+    excel_buffer = BytesIO()
+    excel_data = None
+
+    try:
+        with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Anwesenheiten")
+            workbook  = writer.book
+            worksheet = writer.sheets["Anwesenheiten"]
+
+            # Format: Umbruch + vertikal oben
+            wrap_format = workbook.add_format({"text_wrap": True, "valign": "top"})
+            header_format = workbook.add_format({"bold": True, "bg_color": "#D9E1F2"})
+
+            # Header-Format anwenden
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+
+            # Spaltenbreite anpassen
+            for i, col in enumerate(df.columns):
+                max_len = max(
+                    df[col].astype(str).map(len).max(),
+                    len(col)
+                ) + 2
+                worksheet.set_column(i, i, min(max_len, 50), wrap_format)
+
+        excel_data = excel_buffer.getvalue()
+
+    except ModuleNotFoundError:
+        st.error("Bitte 'xlsxwriter' installieren für schön formatierten Excel-Export.")
+
+
+    progress.progress(100, text="Fertig ✅")
+    st.success("Dateien erfolgreich erstellt ✅")
+
+    # Download Buttons
     st.download_button(
         "Download CSV",
         csv_data,
         file_name="Anwesenheiten_Gesamt.csv",
         mime="text/csv"
     )
+
+    if excel_data:
+        st.download_button(
+            "Download Excel",
+            excel_data,
+            file_name="Anwesenheiten_Gesamt.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.error("Kein Excel-Export möglich – bitte 'openpyxl' oder 'xlsxwriter' installieren.")
 
     st.dataframe(df, use_container_width=True)
