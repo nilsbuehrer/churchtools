@@ -9,6 +9,7 @@ from io import StringIO
 # ---------------------------------------
 st.title("Anwesenheiten Export")
 
+base_url = st.text_input("ChurchTools URL", "https://feg-thayngen.church.tools/")
 token = "Login " + st.text_input("AUTH_TOKEN", type="password")
 start = st.date_input("Von", date(2025, 11, 2))
 end = st.date_input("Bis", date(2026, 3, 1))
@@ -30,40 +31,40 @@ SERVICE_MAP = {
 # API-Helper (mit Cache)
 # ---------------------------------------
 @st.cache_data(ttl=3600)
-def get_events(from_date, to_date, headers):
-    url = "https://feg-thayngen.church.tools/api/events"
+def get_events(from_date, to_date, headers, base_url):
+    url = f"{base_url.rstrip('/')}/api/events"
     params = {"from": from_date, "to": to_date, "canceled": "false", "include": "eventServices"}
     r = requests.get(url, params=params, headers=headers)
     r.raise_for_status()
     return [e for e in r.json()["data"] if e["calendar"]["domainIdentifier"] == "2"]
 
 @st.cache_data(ttl=3600)
-def get_members(group_id, headers):
-    url = "https://feg-thayngen.church.tools/api/groups/members"
+def get_members(group_id, headers, base_url):
+    url = f"{base_url.rstrip('/')}/api/groups/members"
     params = {"ids[]": group_id, "with_deleted": "false"}
     r = requests.get(url, params=params, headers=headers)
     r.raise_for_status()
     return [m["personId"] for m in r.json()["data"]]
 
 @st.cache_data(ttl=3600)
-def get_tags(person_id, headers):
-    url = f"https://feg-thayngen.church.tools/api/tags/person/{person_id}"
+def get_tags(person_id, headers, base_url):
+    url = f"{base_url.rstrip('/')}/api/tags/person/{person_id}"
     r = requests.get(url, headers=headers)
     if r.status_code == 200:
         return [entry["name"] for entry in r.json()["data"]]
     return []
 
 @st.cache_data(ttl=3600)
-def get_group_absences(group_id, from_date, to_date, headers):
-    url = f"https://feg-thayngen.church.tools/api/groups/{group_id}/absences"
+def get_group_absences(group_id, from_date, to_date, headers, base_url):
+    url = f"{base_url.rstrip('/')}/api/groups/{group_id}/absences"
     params = {"from_date": from_date, "to_date": to_date}
     r = requests.get(url, params=params, headers=headers)
     r.raise_for_status()
     return r.json()["data"]
 
 @st.cache_data(ttl=3600)
-def get_full_name(person_id, headers):
-    url = f"https://feg-thayngen.church.tools/api/persons/{person_id}"
+def get_full_name(person_id, headers, base_url):
+    url = f"{base_url.rstrip('/')}/api/persons/{person_id}"
     r = requests.get(url, headers=headers)
     if r.status_code == 200:
         d = r.json()["data"]
@@ -83,7 +84,7 @@ if st.button("CSV generieren"):
     progress = st.progress(0, text="Starte Export...")
 
     # Schritt 1: Events
-    events = get_events(str(start), str(end), headers)
+    events = get_events(str(start), str(end), headers, base_url)
     progress.progress(20, text="Events geladen ✅")
 
     # Schritt 2: Gruppen & Daten vorbereiten
@@ -91,8 +92,8 @@ if st.button("CSV generieren"):
     tags_for_persons = {}
 
     for idx, group in enumerate(GROUPS, start=1):
-        members = get_members(group["id"], headers)
-        absences = get_group_absences(group["id"], str(start), str(end), headers)
+        members = get_members(group["id"], headers, base_url)
+        absences = get_group_absences(group["id"], str(start), str(end), headers, base_url)
 
         # Absenzen sammeln
         for absence in absences:
@@ -106,7 +107,7 @@ if st.button("CSV generieren"):
             col_name = f"{group['name']}: {tag}"
             tags_for_persons[col_name] = []
             for pid in members:
-                if tag in get_tags(pid, headers):
+                if tag in get_tags(pid, headers, base_url):
                     tags_for_persons[col_name].append(pid)
 
         progress.progress(20 + int(60 * idx / len(GROUPS)), text=f"Gruppe {group['name']} geladen ✅")
@@ -154,14 +155,12 @@ if st.button("CSV generieren"):
             for pid in persons:
                 absent = any(s <= event_date <= e for s, e in absence_cache.get(pid, []))
                 if not absent:
-                    name = get_full_name(pid, headers)
+                    name = get_full_name(pid, headers, base_url)
                     if str(pid) in assigned_pids:
                         available_assigned.append(f"({name})")
                     else:
                         available_normal.append(name)
-            # zuerst normale, darunter eingeteilte in Klammern
             row[col] = "\n".join(available_normal + available_assigned)
-
 
         rows.append(row)
         progress.progress(80 + int(20 * i / len(events)), text="Events verarbeitet...")
