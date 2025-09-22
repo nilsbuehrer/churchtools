@@ -21,8 +21,8 @@ end = st.date_input("Bis", default_end)
 
 # Gruppen & Tags
 GROUPS = [
-    {"id": 69, "name": "Programm", "tags": ["Gebet", "Begrüssung", "Deko", "Abendmahl vorbereiten", "Abendmahl abwaschen"]},
-    {"id": 7,  "name": "Technik",  "tags": ["Video", "Audio", "Beamer", "Licht"]}
+    {"id": 7,  "name": "Technik",  "tags": ["Audio", "Video", "Beamer", "Licht"]},
+    {"id": 69, "name": "Programm", "tags": ["Begrüssung", "Gebet", "Deko", "Abendmahl vorbereiten", "Abendmahl abwaschen"]},
 ]
 
 # Dienste (vollständig parsen)
@@ -45,21 +45,21 @@ SERVICE_MAP_FULL = {
 # Dienste, die eigene Spalten bekommen
 SERVICE_MAP_EXPORT = {
     1: "Predigt",
+    3: "Moderation",
     2: "Lobpreisleitung",
-    3: "Moderation"
 }
 
 # Mapping: Tag -> Dienst
 TAG_TO_SERVICE = {
-    "Gebet": 15,
-    "Begrüssung": 18,
-    "Deko": 30,
-    "Abendmahl abwaschen": 36,
-    "Abendmahl vorbereiten": 82,
-    "Video": 8,
     "Audio": 6,
+    "Video": 8,
     "Beamer": 12,
     "Licht": 7,
+    "Begrüssung": 18,
+    "Gebet": 15,
+    "Deko": 30,
+    "Abendmahl vorbereiten": 82,
+    "Abendmahl abwaschen": 36,
 }
 
 # ---------------------------------------
@@ -144,7 +144,7 @@ if st.button("CSV/Excel generieren"):
 
         # Tags vorbereiten
         for tag in group["tags"]:
-            col_name = f"{group['name']}: {tag}"
+            col_name = f"{tag}"
             pids_for_tag = []
             for pid in members:
                 if tag in get_tags(pid, headers, base_url):
@@ -170,34 +170,58 @@ if st.button("CSV/Excel generieren"):
         # --- Services parsen (alle IDs) ---
         service_names = {sid: [] for sid in SERVICE_MAP_FULL.keys()}
         assigned_pids = set()
+        present_sids = {svc.get("serviceId") for svc in event.get("eventServices", [])}
 
         for svc in event.get("eventServices", []):
             sid = svc.get("serviceId")
-            person_obj = svc.get("person")
-            if sid in SERVICE_MAP_FULL and person_obj:
-                pid = int(person_obj.get("domainIdentifier"))
-                person = person_obj.get("domainAttributes", {}) or {}
-                full_name = f"{person.get('firstName','')} {person.get('lastName','')}".strip() \
-                            or get_full_name(pid, headers, base_url)
-                service_names[sid].append(f"*{full_name}")
-                assigned_pids.add(pid)
+            if sid in SERVICE_MAP_FULL:
+                if svc.get("person"):   # normaler ChurchTools-Benutzer
+                    pid = int(svc["person"].get("domainIdentifier"))
+                    person = svc["person"].get("domainAttributes", {}) or {}
+                    full_name = f"{person.get('firstName','')} {person.get('lastName','')}".strip() \
+                                or get_full_name(pid, headers, base_url)
+                    service_names[sid].append(f"!{full_name}")
+                    assigned_pids.add(pid)
+                elif svc.get("name"):   # Gast ohne Person-Objekt, aber mit Name
+                    guest_name = svc.get("name")
+                    service_names[sid].append(f"!{guest_name}")
+                else:                   # vorgesehen, aber unbesetzt
+                    service_names[sid] = []
+
 
         # Nur die Export-Dienste als eigene Spalten
         for sid, col_name in SERVICE_MAP_EXPORT.items():
-            row[col_name] = ", ".join(service_names[sid]) if service_names[sid] else ""
+            row[col_name] = "\n".join(service_names[sid]) if service_names[sid] else ""
 
         # --- Tags/Verfügbarkeiten einfügen ---
         for col, persons in tags_for_persons.items():
             tag = col.split(": ", 1)[1] if ": " in col else col
             sid_for_tag = TAG_TO_SERVICE.get(tag)
 
-            if sid_for_tag and service_names.get(sid_for_tag):
-                # Dienst besetzt -> nur eingeteilte Person(en) mit *
-                row[col] = ", ".join(service_names[sid_for_tag])
+            if sid_for_tag:
+                # 1) Dienst gar nicht im Event vorhanden
+                if sid_for_tag not in present_sids:
+                    row[col] = "-"
+
+                # 2) Dienst vorgesehen und besetzt
+                elif service_names.get(sid_for_tag):
+                    row[col] = "\n".join(service_names[sid_for_tag])
+
+                # 3) Dienst vorgesehen, aber unbesetzt
+                else:
+                    available_normal, available_other = [], []
+                    for pid in persons:
+                        if event_date not in absence_cache.get(pid, set()):
+                            base_name = names_cache.get(pid, f"Person {pid}")
+                            if pid in assigned_pids:
+                                available_other.append(f"({base_name})")
+                            else:
+                                available_normal.append(base_name)
+                    row[col] = "\n".join(available_normal + available_other)
+
             else:
-                # sonst alle verfügbaren Personen
-                available_normal = []
-                available_other = []
+                # Kein Mapping: fallback wie bisher -> verfügbare Personen
+                available_normal, available_other = [], []
                 for pid in persons:
                     if event_date not in absence_cache.get(pid, set()):
                         base_name = names_cache.get(pid, f"Person {pid}")
@@ -206,6 +230,7 @@ if st.button("CSV/Excel generieren"):
                         else:
                             available_normal.append(base_name)
                 row[col] = "\n".join(available_normal + available_other)
+
 
         rows.append(row)
         progress.progress(60 + int(35 * i / max(len(events), 1)), text="Events verarbeitet...")
@@ -227,10 +252,13 @@ if st.button("CSV/Excel generieren"):
             worksheet = writer.sheets["Anwesenheiten"]
 
             # Formate definieren
-            wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
-            bold = workbook.add_format({"text_wrap": True, "valign": "top", "bold": True})
-            italic = workbook.add_format({"text_wrap": True, "valign": "top", "italic": True})
-            header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9E1F2"})
+            base_fmt    = workbook.add_format({"valign": "top", "text_wrap": True})
+            bold        = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True})
+            italic      = workbook.add_format({"italic": True, "valign": "top", "text_wrap": True})
+            green_bold  = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "bg_color": "#C6EFCE"})
+            header_fmt  = workbook.add_format({"bold": True, "bg_color": "#D9E1F2", "valign": "top"})
+            red_bg     = workbook.add_format({"valign": "top", "text_wrap": True, "bg_color": "#FFC7CE"})
+            grey_bg    = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "bg_color": "#F2F2F2"})
 
             # Header schreiben
             for col_num, value in enumerate(df.columns.values):
@@ -238,27 +266,33 @@ if st.button("CSV/Excel generieren"):
 
             # Inhalte schreiben mit Formatierung
             for row_num, row_data in enumerate(df.values, start=1):
+                worksheet.set_row(row_num, None, base_fmt)   # Default Format
+
                 for col_num, cell in enumerate(row_data):
+                    col_name = df.columns[col_num]  # Spaltenname
                     text = str(cell) if pd.notna(cell) else ""
-                    if not text:
+
+                    # 1) Datum/Event -> immer grau
+                    if col_name in ["Datum"]:
+                        worksheet.write(row_num, col_num, text, grey_bg)
                         continue
 
-                    parts = []
-                    for i, line in enumerate(text.split("\n")):
-                        if line.startswith("*"):
-                            parts.extend([bold, line])
-                        elif line.startswith("(") and line.endswith(")"):
-                            parts.extend([italic, line])
-                        else:
-                            parts.extend([wrap, line])
-                        # Zeilenumbruch anhängen, außer bei letzter Zeile
-                        if i < len(text.split("\n")) - 1:
-                            parts.append("\n")
+                    # 2) Keine Person -> rot
+                    if text.strip() == "":
+                        worksheet.write(row_num, col_num, text, red_bg)
+                        continue
 
-                    # Immer mit Standardformat abschließen
-                    parts.append(wrap)
+                    if text.strip() == "-":
+                        worksheet.write(row_num, col_num, text, green_bold)
+                        continue
 
-                    worksheet.write_rich_string(row_num, col_num, *parts)
+                    # 3) Normale Namen
+                    lines = text.split("\n")
+                    cleaned = [line.lstrip("!") for line in lines]
+                    first_fixed = lines[0].startswith("!") if lines else False
+                    fmt = green_bold if first_fixed else base_fmt
+                    worksheet.write(row_num, col_num, "\n".join(cleaned), fmt)
+
 
             # Spaltenbreiten anpassen (max 30)
             for i, col in enumerate(df.columns):
