@@ -252,13 +252,13 @@ if st.button("CSV/Excel generieren"):
             worksheet = writer.sheets["Anwesenheiten"]
 
             # Formate definieren
-            base_fmt    = workbook.add_format({"valign": "top", "text_wrap": True})
-            bold        = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True})
-            italic      = workbook.add_format({"italic": True, "valign": "top", "text_wrap": True})
-            green_bold  = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "bg_color": "#C6EFCE"})
-            header_fmt  = workbook.add_format({"bold": True, "bg_color": "#D9E1F2", "valign": "top"})
-            red_bg     = workbook.add_format({"valign": "top", "text_wrap": True, "bg_color": "#FFC7CE"})
-            grey_bg    = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "bg_color": "#F2F2F2"})
+            base_fmt    = workbook.add_format({"valign": "top", "text_wrap": True, "border": 1, "border_color": "#D9D9D9"})
+            bold        = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "border": 1, "border_color": "#D9D9D9"})
+            italic      = workbook.add_format({"italic": True, "valign": "top", "text_wrap": True, "border": 1, "border_color": "#D9D9D9"})
+            green_bold  = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "bg_color": "#C6EFCE", "border": 1, "border_color": "#D9D9D9"})
+            header_fmt  = workbook.add_format({"bold": True, "bg_color": "#D9E1F2", "valign": "top", "border": 1, "border_color": "#D9D9D9"})
+            red_bg     = workbook.add_format({"valign": "top", "text_wrap": True, "bg_color": "#FFC7CE", "border": 1, "border_color": "#D9D9D9"})
+            grey_bg    = workbook.add_format({"bold": True, "valign": "top", "text_wrap": True, "bg_color": "#F2F2F2", "border": 1, "border_color": "#D9D9D9"})
 
             # Header schreiben
             for col_num, value in enumerate(df.columns.values):
